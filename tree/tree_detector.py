@@ -30,17 +30,26 @@ class BrownPaperDetector(Node):
         self.linear_speed = 0.2  # Forward speed (m/s)
         self.is_moving = False
         
-        # Specific brown color #895129 in HSV
+        # Brown color #895129 detection with lighting tolerance
         # RGB(137, 81, 41) -> HSV(13, 179, 137)
-        # Precise detection range for this exact brown color
-        self.brown_lower = np.array([8, 149, 107])   # Lower HSV bounds for #895129
-        self.brown_upper = np.array([18, 209, 167])  # Upper HSV bounds for #895129
+        # Relaxed ranges to handle varying lighting conditions
+        self.brown_lower = np.array([5, 100, 60])    # More tolerant lower bounds
+        self.brown_upper = np.array([25, 255, 200])  # More tolerant upper bounds
         
-        # Minimum contour area to consider as valid detection
-        self.min_area = 1000
+        # Alternative detection for very bright/dark conditions
+        self.brown_lower_alt = np.array([8, 50, 30])   # For darker lighting
+        self.brown_upper_alt = np.array([20, 200, 160]) # For darker lighting
+        
+        # Minimum contour area to consider as valid detection (more lenient)
+        self.min_area = 500  # Reduced from 1000 for better sensitivity
+        
+        # Debug mode - set to True to see detection masks
+        self.debug_mode = False  # Change to True for debugging
         
         self.get_logger().info('Brown Paper Detector Node Started')
-        self.get_logger().info('Looking for brown colored paper #895129...')
+        self.get_logger().info('Looking for brown colored paper #895129 (lighting adaptive)...')
+        if self.debug_mode:
+            self.get_logger().info('Debug mode enabled - showing detection windows')
 
     def image_callback(self, msg):
         try:
@@ -61,17 +70,24 @@ class BrownPaperDetector(Node):
 
     def detect_brown_paper(self, image):
         """
-        Detect the specific brown colored paper #895129 in the image
-        Returns True if the exact brown paper is detected, False otherwise
+        Detect brown colored paper #895129 with lighting tolerance
+        Uses multiple detection methods for robustness
+        Returns True if brown paper is detected, False otherwise
         """
         # Convert BGR to HSV color space
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Create mask for the specific brown color #895129
-        brown_mask = cv2.inRange(hsv, self.brown_lower, self.brown_upper)
+        # Method 1: Primary brown detection (normal lighting)
+        brown_mask1 = cv2.inRange(hsv, self.brown_lower, self.brown_upper)
+        
+        # Method 2: Alternative range (for different lighting)
+        brown_mask2 = cv2.inRange(hsv, self.brown_lower_alt, self.brown_upper_alt)
+        
+        # Combine both masks for better coverage
+        brown_mask = cv2.bitwise_or(brown_mask1, brown_mask2)
         
         # Apply morphological operations to clean up the mask
-        kernel = np.ones((5, 5), np.uint8)
+        kernel = np.ones((3, 3), np.uint8)  # Smaller kernel for better detail
         brown_mask = cv2.morphologyEx(brown_mask, cv2.MORPH_OPEN, kernel)
         brown_mask = cv2.morphologyEx(brown_mask, cv2.MORPH_CLOSE, kernel)
         
@@ -79,22 +95,42 @@ class BrownPaperDetector(Node):
         contours, _ = cv2.findContours(brown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         # Check if any significant brown areas are detected
+        total_brown_area = 0
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area > self.min_area:
-                # Calculate percentage of image covered by brown
-                total_pixels = image.shape[0] * image.shape[1]
-                brown_percentage = (area / total_pixels) * 100
-                
-                self.get_logger().info(f'Brown paper #895129 detected! Area: {area:.0f} pixels ({brown_percentage:.1f}% of image)')
-                return True
+            total_brown_area += area
+        
+        # Debug visualization (optional)
+        if self.debug_mode:
+            self.show_debug_image(image, brown_mask, total_brown_area)
+        
+        # Lower threshold for detection to be more sensitive
+        if total_brown_area > (self.min_area * 0.5):  # 50% of original threshold
+            # Calculate percentage of image covered by brown
+            total_pixels = image.shape[0] * image.shape[1]
+            brown_percentage = (total_brown_area / total_pixels) * 100
+            
+            self.get_logger().info(f'Brown paper detected! Area: {total_brown_area:.0f} pixels ({brown_percentage:.1f}% of image)')
+            return True
         
         return False
+
+    def show_debug_image(self, original, mask, area):
+        """Show debug visualization of color detection (optional)"""
+        try:
+            # Create debug window showing original and mask
+            debug_img = cv2.hconcat([original, cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)])
+            cv2.putText(debug_img, f'Brown Area: {area:.0f}', (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.imshow('Brown Detection Debug', debug_img)
+            cv2.waitKey(1)
+        except:
+            pass  # Ignore if display not available
 
     def start_moving(self):
         """Start moving the robot forward"""
         if not self.is_moving:
-            self.get_logger().info('Brown paper #895129 detected - Moving forward!')
+            self.get_logger().info('Brown paper detected - Moving forward!')
             self.is_moving = True
             
             # Create and publish forward movement command
@@ -106,7 +142,7 @@ class BrownPaperDetector(Node):
     def stop_moving(self):
         """Stop the robot movement"""
         if self.is_moving:
-            self.get_logger().info('Brown paper #895129 lost - Stopping!')
+            self.get_logger().info('Brown paper lost - Stopping!')
             self.is_moving = False
             
             # Create and publish stop command

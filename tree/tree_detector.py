@@ -3,250 +3,201 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 
-class BrownPaperDetector(Node):
+class BrownColorDetector(Node):
     def __init__(self):
-        super().__init__('brown_paper_detector')
+        super().__init__('brown_color_detector')
         
         # Initialize CV Bridge for converting ROS images to OpenCV format
         self.bridge = CvBridge()
         
-        # Create publisher for robot velocity commands
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        
         # Create subscriber for camera images
         self.image_sub = self.create_subscription(
             Image,
-            '/oak/rgb/image_raw',  # Correct topic for ROSbot 3 Pro OAK camera
+            '/oak/rgb/image_raw',  # ROSbot 3 Pro OAK camera
             self.image_callback,
             10
         )
-        
-        # Movement parameters
-        self.linear_speed = 0.2  # Forward speed (m/s)
-        self.is_moving = False
         
         # Frame counter for debugging
         self.frame_count = 0
         self.detection_count = 0
         
-        # Brown color #895129 detection - MUCH more restrictive to avoid false positives
-        # RGB(137, 81, 41) -> HSV(13, 179, 137)
-        # Tighter ranges to avoid detecting furniture/wooden surfaces
-        self.brown_lower = np.array([10, 120, 80])   # More restrictive bounds
-        self.brown_upper = np.array([18, 255, 180])  # More restrictive bounds
+        # BROAD BROWN SPECTRUM DETECTION
+        # Covers all brown colors: light brown, dark brown, reddish brown, yellowish brown
         
-        # Minimum contour area to consider as valid detection (higher to avoid small brown spots)
-        self.min_area = 2000  # Increased from 500 to avoid furniture detection
+        # Range 1: Reddish browns (like mahogany, chestnut)
+        self.brown_lower1 = np.array([0, 30, 30])      # Very broad range
+        self.brown_upper1 = np.array([15, 255, 200])   
         
-        # Debug mode - set to True to see detection masks
-        self.debug_mode = True  # Enabled by default to help with setup
+        # Range 2: Classic browns (like chocolate, coffee)
+        self.brown_lower2 = np.array([8, 40, 20])  
+        self.brown_upper2 = np.array([25, 255, 180])
         
-        self.get_logger().info('Brown Paper Detector Node Started')
-        self.get_logger().info('Looking for brown colored PAPER #895129 with shape filtering...')
-        self.get_logger().info('This will ignore brown furniture/surfaces and only detect paper-like shapes')
-        self.get_logger().info(f'Subscribing to camera topic: /oak/rgb/image_raw')
-        self.get_logger().info(f'Publishing to velocity topic: /cmd_vel')
+        # Range 3: Yellowish browns (like tan, beige, khaki)
+        self.brown_lower3 = np.array([15, 20, 40])
+        self.brown_upper3 = np.array([35, 200, 220])
+        
+        # Minimum area to consider as detection (lowered for broader detection)
+        self.min_area = 500
+        
+        # Debug mode
+        self.debug_mode = True
+        
+        self.get_logger().info('🟤 Brown Color Detector Started')
+        self.get_logger().info('🎯 Target: ENTIRE BROWN SPECTRUM (all brown colors)')
+        self.get_logger().info('🔍 DETECTION ONLY MODE - No movement')
+        self.get_logger().info(f'📷 Camera topic: /oak/rgb/image_raw')
         if self.debug_mode:
-            self.get_logger().info('Debug mode enabled - showing detection windows')
+            self.get_logger().info('🐛 Debug mode enabled - showing detection windows')
         
-        # Timer to check if we're receiving images
-        self.timer = self.create_timer(5.0, self.status_check)
+        # Timer for status updates
+        self.timer = self.create_timer(10.0, self.status_update)
 
     def image_callback(self, msg):
         try:
             self.frame_count += 1
             
-            # Log every 30 frames (about once per second at 30fps)
-            if self.frame_count % 30 == 0:
-                self.get_logger().info(f'Processing frame {self.frame_count}... Camera is working!')
-            
             # Convert ROS image to OpenCV format
             cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
             
-            # Log image dimensions occasionally
+            # Log camera status occasionally
             if self.frame_count % 60 == 0:
                 h, w = cv_image.shape[:2]
-                self.get_logger().info(f'Image size: {w}x{h} pixels')
+                self.get_logger().info(f'📷 Camera working! Frame {self.frame_count}, Size: {w}x{h}')
             
-            # Detect brown paper in the image
-            brown_detected = self.detect_brown_paper(cv_image)
+            # Detect brown color
+            brown_detected, detection_info = self.detect_brown_color(cv_image)
             
-            # Control robot movement based on detection
-            if brown_detected and not self.is_moving:
+            # Print detection results
+            if brown_detected:
                 self.detection_count += 1
-                self.start_moving()
-            elif not brown_detected and self.is_moving:
-                self.stop_moving()
+                self.get_logger().info(f'🟤 BROWN COLOR DETECTED! {detection_info}')
+            else:
+                # Print scan status every 3 seconds when not detecting
+                if self.frame_count % 90 == 0:
+                    self.get_logger().info(f'🔍 Scanning for brown colors... {detection_info}')
                 
         except Exception as e:
-            self.get_logger().error(f'Error processing image: {str(e)}')
+            self.get_logger().error(f'❌ Error processing image: {str(e)}')
 
-    def detect_brown_paper(self, image):
+    def detect_brown_color(self, image):
         """
-        Detect brown colored paper #895129 with shape filtering to avoid false positives
-        Returns True if brown paper (rectangular shape) is detected, False otherwise
+        Detect ANY brown color across the entire brown spectrum
+        Returns (detected: bool, info: str)
         """
-        # Convert BGR to HSV color space
+        # Convert to HSV
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Create mask for the specific brown color (more restrictive)
-        brown_mask = cv2.inRange(hsv, self.brown_lower, self.brown_upper)
+        # Try multiple detection ranges
+        mask1 = cv2.inRange(hsv, self.brown_lower1, self.brown_upper1)
+        mask2 = cv2.inRange(hsv, self.brown_lower2, self.brown_upper2)  
+        mask3 = cv2.inRange(hsv, self.brown_lower3, self.brown_upper3)
         
-        # Apply morphological operations to clean up the mask
+        # Combine all masks
+        combined_mask = cv2.bitwise_or(mask1, mask2)
+        combined_mask = cv2.bitwise_or(combined_mask, mask3)
+        
+        # Clean up the mask
         kernel = np.ones((3, 3), np.uint8)
-        brown_mask = cv2.morphologyEx(brown_mask, cv2.MORPH_OPEN, kernel)
-        brown_mask = cv2.morphologyEx(brown_mask, cv2.MORPH_CLOSE, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
         
-        # Find contours in the mask
-        contours, _ = cv2.findContours(brown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Calculate total brown area
+        total_brown_pixels = cv2.countNonZero(combined_mask)
         
-        # Check each contour for paper-like properties
-        valid_detections = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            
-            # Must be above minimum area
-            if area < self.min_area:
-                continue
-                
-            # Check if shape is somewhat rectangular (paper-like)
-            if self.is_paper_like_shape(contour, area):
-                valid_detections.append(area)
+        # Find contours for detailed analysis
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        largest_contour_area = 0
+        if contours:
+            largest_contour_area = max(cv2.contourArea(contour) for contour in contours)
         
-        # Debug visualization (optional)
+        # Calculate percentage of image
+        total_pixels = image.shape[0] * image.shape[1]
+        brown_percentage = (total_brown_pixels / total_pixels) * 100
+        
+        # Debug visualization
         if self.debug_mode:
-            self.show_debug_image(image, brown_mask, sum(valid_detections))
+            self.show_debug_image(image, combined_mask, total_brown_pixels, largest_contour_area)
         
-        # Only consider it a detection if we have valid paper-like shapes
-        if valid_detections:
-            total_area = sum(valid_detections)
-            total_pixels = image.shape[0] * image.shape[1]
-            brown_percentage = (total_area / total_pixels) * 100
-            
-            self.get_logger().info(f'✓ BROWN PAPER DETECTED! Area: {total_area:.0f} pixels ({brown_percentage:.1f}% of image)')
-            return True
-        else:
-            # Log occasionally that we're looking but not finding valid paper
-            if self.frame_count % 60 == 0:  # Every 2 seconds
-                total_brown = sum(cv2.contourArea(c) for c in contours)
-                self.get_logger().info(f'Scanning... Brown areas: {total_brown:.0f}, Valid paper shapes: 0')
+        # Create info string
+        info = f"Total: {total_brown_pixels} pixels ({brown_percentage:.2f}%), Largest blob: {largest_contour_area:.0f}"
         
-        return False
+        # Detection logic - either total area OR largest contour must be significant
+        detected = (total_brown_pixels > self.min_area) or (largest_contour_area > self.min_area)
+        
+        return detected, info
 
-    def is_paper_like_shape(self, contour, area):
-        """
-        Check if a contour looks like a piece of paper
-        Returns True if the shape is paper-like, False otherwise
-        """
-        # Get bounding rectangle
-        x, y, w, h = cv2.boundingRect(contour)
-        
-        # Calculate aspect ratio (width/height)
-        aspect_ratio = float(w) / h
-        
-        # Paper should have reasonable aspect ratio (not too thin or too square)
-        if aspect_ratio < 0.3 or aspect_ratio > 3.5:
-            return False
-        
-        # Calculate how much of the bounding rectangle is filled
-        rect_area = w * h
-        extent = float(area) / rect_area
-        
-        # Paper should fill a good portion of its bounding rectangle
-        if extent < 0.5:  # At least 50% filled
-            return False
-        
-        # Check if contour can be approximated as a quadrilateral (4-sided shape)
-        epsilon = 0.02 * cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, epsilon, True)
-        
-        # Paper should be somewhat rectangular (3-6 sides when approximated)
-        if len(approx) < 3 or len(approx) > 8:
-            return False
-            
-        return True
-
-    def status_check(self):
-        """Periodic status check to ensure everything is working"""
-        self.get_logger().info(f'Status: Processed {self.frame_count} frames, {self.detection_count} brown detections')
-        if self.frame_count == 0:
-            self.get_logger().warn('⚠️  No camera frames received! Check camera connection and topic name.')
-            self.get_logger().info('💡 Try running: ros2 topic echo /oak/rgb/image_raw --once')
-            self.get_logger().info('💡 Available camera topics: /oak/rgb/image_raw, /oak/rgb/image_rect')
-
-    def show_debug_image(self, original, mask, area):
-        """Show debug visualization of color detection and shape filtering"""
+    def show_debug_image(self, original, mask, total_pixels, largest_area):
+        """Show debug visualization"""
         try:
-            # Create debug window showing original and mask
-            debug_img = cv2.hconcat([original, cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)])
+            # Resize images for display if too large
+            h, w = original.shape[:2]
+            if w > 800:
+                scale = 800 / w
+                new_w, new_h = int(w * scale), int(h * scale)
+                original = cv2.resize(original, (new_w, new_h))
+                mask = cv2.resize(mask, (new_w, new_h))
             
-            # Add text overlay with detection info
-            cv2.putText(debug_img, f'Brown Area: {area:.0f} (need >{self.min_area})', 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(debug_img, 'Original Image | Brown Mask', 
-                       (10, debug_img.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            # Create side-by-side display
+            mask_colored = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            debug_img = cv2.hconcat([original, mask_colored])
             
-            cv2.imshow('Brown Paper Detection Debug', debug_img)
+            # Add text overlays
+            cv2.putText(debug_img, f'Brown Pixels: {total_pixels}', 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(debug_img, f'Largest Blob: {largest_area:.0f}', 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(debug_img, f'Threshold: {self.min_area}', 
+                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            cv2.putText(debug_img, 'Original | Brown Mask', 
+                       (10, debug_img.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Show detection status
+            status_color = (0, 255, 0) if (total_pixels > self.min_area or largest_area > self.min_area) else (0, 0, 255)
+            status_text = "DETECTED!" if (total_pixels > self.min_area or largest_area > self.min_area) else "Scanning..."
+            cv2.putText(debug_img, status_text, 
+                       (debug_img.shape[1] - 200, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+            
+            cv2.imshow('Brown Spectrum Detection', debug_img)
             cv2.waitKey(1)
-        except:
-            pass  # Ignore if display not available
+        except Exception as e:
+            self.get_logger().warn(f'Debug display error: {e}')
 
-    def start_moving(self):
-        """Start moving the robot forward"""
-        if not self.is_moving:
-            self.get_logger().info('🟤 BROWN DETECTED → MOVING FORWARD! 🚀')
-            self.is_moving = True
-            
-            # Create and publish forward movement command
-            twist = Twist()
-            twist.linear.x = self.linear_speed
-            twist.angular.z = 0.0
-            self.cmd_vel_pub.publish(twist)
-
-    def stop_moving(self):
-        """Stop the robot movement"""
-        if self.is_moving:
-            self.get_logger().info('❌ BROWN LOST → STOPPING! 🛑')
-            self.is_moving = False
-            
-            # Create and publish stop command
-            twist = Twist()
-            twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            self.cmd_vel_pub.publish(twist)
-
-    def shutdown_callback(self):
-        """Ensure robot stops when node is shutdown"""
-        self.get_logger().info('Shutting down brown detector...')
-        self.stop_moving()
-        if hasattr(self, 'timer'):
-            self.timer.cancel()
+    def status_update(self):
+        """Print periodic status"""
+        detection_rate = (self.detection_count / max(self.frame_count, 1)) * 100
+        self.get_logger().info(f'📊 Status: {self.frame_count} frames processed, {self.detection_count} detections ({detection_rate:.1f}%)')
+        
+        if self.frame_count == 0:
+            self.get_logger().warn('⚠️  No camera frames received!')
+            self.get_logger().info('💡 Check: ros2 topic echo /oak/rgb/image_raw --once')
 
 def main(args=None):
     rclpy.init(args=args)
     
     try:
-        # Create and run the brown paper detector node
-        detector = BrownPaperDetector()
+        detector = BrownColorDetector()
+        print('🚀 Starting brown spectrum detection...')
+        print('👀 Point camera at ANY brown object to test!')
         
-        # Handle shutdown gracefully
         try:
             rclpy.spin(detector)
         except KeyboardInterrupt:
-            detector.get_logger().info('Shutting down...')
+            detector.get_logger().info('🛑 Stopping detection...')
         finally:
-            detector.shutdown_callback()
+            if hasattr(detector, 'timer'):
+                detector.timer.cancel()
             detector.destroy_node()
             
     except Exception as e:
-        print(f'Error: {e}')
+        print(f'❌ Error: {e}')
     finally:
         rclpy.shutdown()
+        cv2.destroyAllWindows()
 
 if __name__ == '__main__':
     main()

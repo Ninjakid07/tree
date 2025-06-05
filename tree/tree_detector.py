@@ -34,24 +34,21 @@ class BrownPaperDetector(Node):
         self.frame_count = 0
         self.detection_count = 0
         
-        # Brown color #895129 detection with lighting tolerance
+        # Brown color #895129 detection - MUCH more restrictive to avoid false positives
         # RGB(137, 81, 41) -> HSV(13, 179, 137)
-        # Relaxed ranges to handle varying lighting conditions
-        self.brown_lower = np.array([5, 100, 60])    # More tolerant lower bounds
-        self.brown_upper = np.array([25, 255, 200])  # More tolerant upper bounds
+        # Tighter ranges to avoid detecting furniture/wooden surfaces
+        self.brown_lower = np.array([10, 120, 80])   # More restrictive bounds
+        self.brown_upper = np.array([18, 255, 180])  # More restrictive bounds
         
-        # Alternative detection for very bright/dark conditions
-        self.brown_lower_alt = np.array([8, 50, 30])   # For darker lighting
-        self.brown_upper_alt = np.array([20, 200, 160]) # For darker lighting
-        
-        # Minimum contour area to consider as valid detection (more lenient)
-        self.min_area = 500  # Reduced from 1000 for better sensitivity
+        # Minimum contour area to consider as valid detection (higher to avoid small brown spots)
+        self.min_area = 2000  # Increased from 500 to avoid furniture detection
         
         # Debug mode - set to True to see detection masks
-        self.debug_mode = False  # Change to True for debugging
+        self.debug_mode = True  # Enabled by default to help with setup
         
         self.get_logger().info('Brown Paper Detector Node Started')
-        self.get_logger().info('Looking for brown colored paper #895129 (lighting adaptive)...')
+        self.get_logger().info('Looking for brown colored PAPER #895129 with shape filtering...')
+        self.get_logger().info('This will ignore brown furniture/surfaces and only detect paper-like shapes')
         self.get_logger().info(f'Subscribing to camera topic: /oak/rgb/image_raw')
         self.get_logger().info(f'Publishing to velocity topic: /cmd_vel')
         if self.debug_mode:
@@ -91,54 +88,88 @@ class BrownPaperDetector(Node):
 
     def detect_brown_paper(self, image):
         """
-        Detect brown colored paper #895129 with lighting tolerance
-        Uses multiple detection methods for robustness
-        Returns True if brown paper is detected, False otherwise
+        Detect brown colored paper #895129 with shape filtering to avoid false positives
+        Returns True if brown paper (rectangular shape) is detected, False otherwise
         """
         # Convert BGR to HSV color space
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
         
-        # Method 1: Primary brown detection (normal lighting)
-        brown_mask1 = cv2.inRange(hsv, self.brown_lower, self.brown_upper)
-        
-        # Method 2: Alternative range (for different lighting)
-        brown_mask2 = cv2.inRange(hsv, self.brown_lower_alt, self.brown_upper_alt)
-        
-        # Combine both masks for better coverage
-        brown_mask = cv2.bitwise_or(brown_mask1, brown_mask2)
+        # Create mask for the specific brown color (more restrictive)
+        brown_mask = cv2.inRange(hsv, self.brown_lower, self.brown_upper)
         
         # Apply morphological operations to clean up the mask
-        kernel = np.ones((3, 3), np.uint8)  # Smaller kernel for better detail
+        kernel = np.ones((3, 3), np.uint8)
         brown_mask = cv2.morphologyEx(brown_mask, cv2.MORPH_OPEN, kernel)
         brown_mask = cv2.morphologyEx(brown_mask, cv2.MORPH_CLOSE, kernel)
         
         # Find contours in the mask
         contours, _ = cv2.findContours(brown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Check if any significant brown areas are detected
-        total_brown_area = 0
+        # Check each contour for paper-like properties
+        valid_detections = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            total_brown_area += area
+            
+            # Must be above minimum area
+            if area < self.min_area:
+                continue
+                
+            # Check if shape is somewhat rectangular (paper-like)
+            if self.is_paper_like_shape(contour, area):
+                valid_detections.append(area)
         
         # Debug visualization (optional)
         if self.debug_mode:
-            self.show_debug_image(image, brown_mask, total_brown_area)
+            self.show_debug_image(image, brown_mask, sum(valid_detections))
         
-        # Lower threshold for detection to be more sensitive
-        if total_brown_area > (self.min_area * 0.5):  # 50% of original threshold
-            # Calculate percentage of image covered by brown
+        # Only consider it a detection if we have valid paper-like shapes
+        if valid_detections:
+            total_area = sum(valid_detections)
             total_pixels = image.shape[0] * image.shape[1]
-            brown_percentage = (total_brown_area / total_pixels) * 100
+            brown_percentage = (total_area / total_pixels) * 100
             
-            self.get_logger().info(f'✓ BROWN PAPER DETECTED! Area: {total_brown_area:.0f} pixels ({brown_percentage:.1f}% of image)')
+            self.get_logger().info(f'✓ BROWN PAPER DETECTED! Area: {total_area:.0f} pixels ({brown_percentage:.1f}% of image)')
             return True
         else:
-            # Log occasionally that we're looking but not finding
+            # Log occasionally that we're looking but not finding valid paper
             if self.frame_count % 60 == 0:  # Every 2 seconds
-                self.get_logger().info(f'Scanning for brown... Current area: {total_brown_area:.0f} (need >{self.min_area*0.5:.0f})')
+                total_brown = sum(cv2.contourArea(c) for c in contours)
+                self.get_logger().info(f'Scanning... Brown areas: {total_brown:.0f}, Valid paper shapes: 0')
         
         return False
+
+    def is_paper_like_shape(self, contour, area):
+        """
+        Check if a contour looks like a piece of paper
+        Returns True if the shape is paper-like, False otherwise
+        """
+        # Get bounding rectangle
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Calculate aspect ratio (width/height)
+        aspect_ratio = float(w) / h
+        
+        # Paper should have reasonable aspect ratio (not too thin or too square)
+        if aspect_ratio < 0.3 or aspect_ratio > 3.5:
+            return False
+        
+        # Calculate how much of the bounding rectangle is filled
+        rect_area = w * h
+        extent = float(area) / rect_area
+        
+        # Paper should fill a good portion of its bounding rectangle
+        if extent < 0.5:  # At least 50% filled
+            return False
+        
+        # Check if contour can be approximated as a quadrilateral (4-sided shape)
+        epsilon = 0.02 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        
+        # Paper should be somewhat rectangular (3-6 sides when approximated)
+        if len(approx) < 3 or len(approx) > 8:
+            return False
+            
+        return True
 
     def status_check(self):
         """Periodic status check to ensure everything is working"""
@@ -149,13 +180,18 @@ class BrownPaperDetector(Node):
             self.get_logger().info('💡 Available camera topics: /oak/rgb/image_raw, /oak/rgb/image_rect')
 
     def show_debug_image(self, original, mask, area):
-        """Show debug visualization of color detection (optional)"""
+        """Show debug visualization of color detection and shape filtering"""
         try:
             # Create debug window showing original and mask
             debug_img = cv2.hconcat([original, cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)])
-            cv2.putText(debug_img, f'Brown Area: {area:.0f}', (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.imshow('Brown Detection Debug', debug_img)
+            
+            # Add text overlay with detection info
+            cv2.putText(debug_img, f'Brown Area: {area:.0f} (need >{self.min_area})', 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(debug_img, 'Original Image | Brown Mask', 
+                       (10, debug_img.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+            
+            cv2.imshow('Brown Paper Detection Debug', debug_img)
             cv2.waitKey(1)
         except:
             pass  # Ignore if display not available

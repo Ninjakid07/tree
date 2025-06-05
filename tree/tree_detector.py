@@ -21,7 +21,7 @@ class BrownPaperDetector(Node):
         # Create subscriber for camera images
         self.image_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',  # Adjust topic name if different
+            '/oak/rgb/image_raw',  # Correct topic for ROSbot 3 Pro OAK camera
             self.image_callback,
             10
         )
@@ -52,7 +52,7 @@ class BrownPaperDetector(Node):
         
         self.get_logger().info('Brown Paper Detector Node Started')
         self.get_logger().info('Looking for brown colored paper #895129 (lighting adaptive)...')
-        self.get_logger().info(f'Subscribing to camera topic: /camera/image_raw')
+        self.get_logger().info(f'Subscribing to camera topic: /oak/rgb/image_raw')
         self.get_logger().info(f'Publishing to velocity topic: /cmd_vel')
         if self.debug_mode:
             self.get_logger().info('Debug mode enabled - showing detection windows')
@@ -145,8 +145,8 @@ class BrownPaperDetector(Node):
         self.get_logger().info(f'Status: Processed {self.frame_count} frames, {self.detection_count} brown detections')
         if self.frame_count == 0:
             self.get_logger().warn('⚠️  No camera frames received! Check camera connection and topic name.')
-            self.get_logger().info('💡 Try running: ros2 topic list | grep image')
-            self.get_logger().info('💡 Or check with: ros2 topic echo /camera/image_raw --once')
+            self.get_logger().info('💡 Try running: ros2 topic echo /oak/rgb/image_raw --once')
+            self.get_logger().info('💡 Available camera topics: /oak/rgb/image_raw, /oak/rgb/image_rect')
 
     def show_debug_image(self, original, mask, area):
         """Show debug visualization of color detection (optional)"""

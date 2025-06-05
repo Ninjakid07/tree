@@ -3,6 +3,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
@@ -21,6 +22,16 @@ class BrownColorDetector(Node):
             self.image_callback,
             10
         )
+        
+        # Create publisher for robot velocity commands
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        
+        # Movement parameters
+        self.linear_speed = 0.2  # Forward speed (m/s)
+        self.is_moving = False
+        
+        # Detection threshold
+        self.percentage_threshold = 11.0  # Move forward if brown > 11%
         
         # Frame counter for debugging
         self.frame_count = 0
@@ -44,13 +55,14 @@ class BrownColorDetector(Node):
         # Minimum area to consider as detection (lowered for broader detection)
         self.min_area = 500
         
-        # Debug mode
-        self.debug_mode = True
+        # Debug mode - disabled by default to avoid GTK errors
+        self.debug_mode = False  # Set to True only if you have display
         
         self.get_logger().info('🟤 Brown Color Detector Started')
         self.get_logger().info('🎯 Target: ENTIRE BROWN SPECTRUM (all brown colors)')
-        self.get_logger().info('🔍 DETECTION ONLY MODE - No movement')
+        self.get_logger().info(f'🚀 MOVEMENT MODE - Forward if brown > {self.percentage_threshold}%')
         self.get_logger().info(f'📷 Camera topic: /oak/rgb/image_raw')
+        self.get_logger().info(f'🔧 Publishing to: /cmd_vel')
         if self.debug_mode:
             self.get_logger().info('🐛 Debug mode enabled - showing detection windows')
         
@@ -69,17 +81,18 @@ class BrownColorDetector(Node):
                 h, w = cv_image.shape[:2]
                 self.get_logger().info(f'📷 Camera working! Frame {self.frame_count}, Size: {w}x{h}')
             
-            # Detect brown color
-            brown_detected, detection_info = self.detect_brown_color(cv_image)
+            # Detect brown color and get percentage
+            brown_percentage, detection_info = self.detect_brown_color(cv_image)
             
-            # Print detection results
-            if brown_detected:
-                self.detection_count += 1
-                self.get_logger().info(f'🟤 BROWN COLOR DETECTED! {detection_info}')
+            # Movement logic based on percentage threshold
+            if brown_percentage > self.percentage_threshold:
+                if not self.is_moving:
+                    self.start_moving()
+                self.get_logger().info(f'{brown_percentage:.2f}% detected brown')
             else:
-                # Print scan status every 3 seconds when not detecting
-                if self.frame_count % 90 == 0:
-                    self.get_logger().info(f'🔍 Scanning for brown colors... {detection_info}')
+                if self.is_moving:
+                    self.stop_moving()
+                self.get_logger().info(f'{brown_percentage:.2f}% NOT DETECTED')
                 
         except Exception as e:
             self.get_logger().error(f'❌ Error processing image: {str(e)}')
@@ -87,7 +100,7 @@ class BrownColorDetector(Node):
     def detect_brown_color(self, image):
         """
         Detect ANY brown color across the entire brown spectrum
-        Returns (detected: bool, info: str)
+        Returns (percentage: float, info: str)
         """
         # Convert to HSV
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -115,24 +128,21 @@ class BrownColorDetector(Node):
         if contours:
             largest_contour_area = max(cv2.contourArea(contour) for contour in contours)
         
-        # Calculate percentage of image
+        # Calculate percentage of image (keep this calculation exactly as it is)
         total_pixels = image.shape[0] * image.shape[1]
         brown_percentage = (total_brown_pixels / total_pixels) * 100
         
-        # Debug visualization
+        # Debug visualization (only if enabled and display available)
         if self.debug_mode:
-            self.show_debug_image(image, combined_mask, total_brown_pixels, largest_contour_area)
+            self.show_debug_image(image, combined_mask, total_brown_pixels, largest_contour_area, brown_percentage)
         
         # Create info string
         info = f"Total: {total_brown_pixels} pixels ({brown_percentage:.2f}%), Largest blob: {largest_contour_area:.0f}"
         
-        # Detection logic - either total area OR largest contour must be significant
-        detected = (total_brown_pixels > self.min_area) or (largest_contour_area > self.min_area)
-        
-        return detected, info
+        return brown_percentage, info
 
-    def show_debug_image(self, original, mask, total_pixels, largest_area):
-        """Show debug visualization"""
+    def show_debug_image(self, original, mask, total_pixels, largest_area, percentage):
+        """Show debug visualization - handles display errors gracefully"""
         try:
             # Resize images for display if too large
             h, w = original.shape[:2]
@@ -149,55 +159,91 @@ class BrownColorDetector(Node):
             # Add text overlays
             cv2.putText(debug_img, f'Brown Pixels: {total_pixels}', 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.putText(debug_img, f'Largest Blob: {largest_area:.0f}', 
+            cv2.putText(debug_img, f'Percentage: {percentage:.2f}%', 
                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.putText(debug_img, f'Threshold: {self.min_area}', 
+            cv2.putText(debug_img, f'Threshold: {self.percentage_threshold}%', 
                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             cv2.putText(debug_img, 'Original | Brown Mask', 
                        (10, debug_img.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             # Show detection status
-            status_color = (0, 255, 0) if (total_pixels > self.min_area or largest_area > self.min_area) else (0, 0, 255)
-            status_text = "DETECTED!" if (total_pixels > self.min_area or largest_area > self.min_area) else "Scanning..."
+            status_color = (0, 255, 0) if percentage > self.percentage_threshold else (0, 0, 255)
+            status_text = "MOVING!" if percentage > self.percentage_threshold else "Scanning..."
             cv2.putText(debug_img, status_text, 
                        (debug_img.shape[1] - 200, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
             
             cv2.imshow('Brown Spectrum Detection', debug_img)
             cv2.waitKey(1)
+            
         except Exception as e:
-            self.get_logger().warn(f'Debug display error: {e}')
+            # Silently disable debug mode if display not available
+            if self.debug_mode:
+                self.get_logger().warn(f'Disabling debug display - no GUI available: {str(e)[:50]}...')
+                self.debug_mode = False
+
+    def start_moving(self):
+        """Start moving the robot forward"""
+        self.get_logger().info('🚀 BROWN > 11% → MOVING FORWARD!')
+        self.is_moving = True
+        
+        # Create and publish forward movement command
+        twist = Twist()
+        twist.linear.x = self.linear_speed
+        twist.angular.z = 0.0
+        self.cmd_vel_pub.publish(twist)
+
+    def stop_moving(self):
+        """Stop the robot movement"""
+        self.get_logger().info('🛑 BROWN < 11% → STOPPING!')
+        self.is_moving = False
+        
+        # Create and publish stop command
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.angular.z = 0.0
+        self.cmd_vel_pub.publish(twist)
 
     def status_update(self):
         """Print periodic status"""
-        detection_rate = (self.detection_count / max(self.frame_count, 1)) * 100
-        self.get_logger().info(f'📊 Status: {self.frame_count} frames processed, {self.detection_count} detections ({detection_rate:.1f}%)')
+        movement_status = "MOVING" if self.is_moving else "STOPPED"
+        self.get_logger().info(f'📊 Status: {self.frame_count} frames processed, Robot: {movement_status}')
         
         if self.frame_count == 0:
             self.get_logger().warn('⚠️  No camera frames received!')
             self.get_logger().info('💡 Check: ros2 topic echo /oak/rgb/image_raw --once')
+
+    def shutdown_callback(self):
+        """Ensure robot stops when node is shutdown"""
+        self.get_logger().info('🛑 Shutting down brown detector...')
+        if self.is_moving:
+            self.stop_moving()
+        if hasattr(self, 'timer'):
+            self.timer.cancel()
 
 def main(args=None):
     rclpy.init(args=args)
     
     try:
         detector = BrownColorDetector()
-        print('🚀 Starting brown spectrum detection...')
-        print('👀 Point camera at ANY brown object to test!')
+        print('🚀 Starting brown spectrum detection with movement...')
+        print('👀 Robot will move forward when brown > 11%!')
         
         try:
             rclpy.spin(detector)
         except KeyboardInterrupt:
             detector.get_logger().info('🛑 Stopping detection...')
         finally:
-            if hasattr(detector, 'timer'):
-                detector.timer.cancel()
+            detector.shutdown_callback()
             detector.destroy_node()
             
     except Exception as e:
         print(f'❌ Error: {e}')
     finally:
         rclpy.shutdown()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except:
+            pass  # Ignore if no windows or no display
 
 if __name__ == '__main__':
     main()

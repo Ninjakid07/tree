@@ -30,6 +30,10 @@ class BrownPaperDetector(Node):
         self.linear_speed = 0.2  # Forward speed (m/s)
         self.is_moving = False
         
+        # Frame counter for debugging
+        self.frame_count = 0
+        self.detection_count = 0
+        
         # Brown color #895129 detection with lighting tolerance
         # RGB(137, 81, 41) -> HSV(13, 179, 137)
         # Relaxed ranges to handle varying lighting conditions
@@ -48,19 +52,36 @@ class BrownPaperDetector(Node):
         
         self.get_logger().info('Brown Paper Detector Node Started')
         self.get_logger().info('Looking for brown colored paper #895129 (lighting adaptive)...')
+        self.get_logger().info(f'Subscribing to camera topic: /camera/image_raw')
+        self.get_logger().info(f'Publishing to velocity topic: /cmd_vel')
         if self.debug_mode:
             self.get_logger().info('Debug mode enabled - showing detection windows')
+        
+        # Timer to check if we're receiving images
+        self.timer = self.create_timer(5.0, self.status_check)
 
     def image_callback(self, msg):
         try:
+            self.frame_count += 1
+            
+            # Log every 30 frames (about once per second at 30fps)
+            if self.frame_count % 30 == 0:
+                self.get_logger().info(f'Processing frame {self.frame_count}... Camera is working!')
+            
             # Convert ROS image to OpenCV format
             cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            
+            # Log image dimensions occasionally
+            if self.frame_count % 60 == 0:
+                h, w = cv_image.shape[:2]
+                self.get_logger().info(f'Image size: {w}x{h} pixels')
             
             # Detect brown paper in the image
             brown_detected = self.detect_brown_paper(cv_image)
             
             # Control robot movement based on detection
             if brown_detected and not self.is_moving:
+                self.detection_count += 1
                 self.start_moving()
             elif not brown_detected and self.is_moving:
                 self.stop_moving()
@@ -110,10 +131,22 @@ class BrownPaperDetector(Node):
             total_pixels = image.shape[0] * image.shape[1]
             brown_percentage = (total_brown_area / total_pixels) * 100
             
-            self.get_logger().info(f'Brown paper detected! Area: {total_brown_area:.0f} pixels ({brown_percentage:.1f}% of image)')
+            self.get_logger().info(f'✓ BROWN PAPER DETECTED! Area: {total_brown_area:.0f} pixels ({brown_percentage:.1f}% of image)')
             return True
+        else:
+            # Log occasionally that we're looking but not finding
+            if self.frame_count % 60 == 0:  # Every 2 seconds
+                self.get_logger().info(f'Scanning for brown... Current area: {total_brown_area:.0f} (need >{self.min_area*0.5:.0f})')
         
         return False
+
+    def status_check(self):
+        """Periodic status check to ensure everything is working"""
+        self.get_logger().info(f'Status: Processed {self.frame_count} frames, {self.detection_count} brown detections')
+        if self.frame_count == 0:
+            self.get_logger().warn('⚠️  No camera frames received! Check camera connection and topic name.')
+            self.get_logger().info('💡 Try running: ros2 topic list | grep image')
+            self.get_logger().info('💡 Or check with: ros2 topic echo /camera/image_raw --once')
 
     def show_debug_image(self, original, mask, area):
         """Show debug visualization of color detection (optional)"""
@@ -130,7 +163,7 @@ class BrownPaperDetector(Node):
     def start_moving(self):
         """Start moving the robot forward"""
         if not self.is_moving:
-            self.get_logger().info('Brown paper detected - Moving forward!')
+            self.get_logger().info('🟤 BROWN DETECTED → MOVING FORWARD! 🚀')
             self.is_moving = True
             
             # Create and publish forward movement command
@@ -142,7 +175,7 @@ class BrownPaperDetector(Node):
     def stop_moving(self):
         """Stop the robot movement"""
         if self.is_moving:
-            self.get_logger().info('Brown paper lost - Stopping!')
+            self.get_logger().info('❌ BROWN LOST → STOPPING! 🛑')
             self.is_moving = False
             
             # Create and publish stop command
@@ -153,7 +186,10 @@ class BrownPaperDetector(Node):
 
     def shutdown_callback(self):
         """Ensure robot stops when node is shutdown"""
+        self.get_logger().info('Shutting down brown detector...')
         self.stop_moving()
+        if hasattr(self, 'timer'):
+            self.timer.cancel()
 
 def main(args=None):
     rclpy.init(args=args)
